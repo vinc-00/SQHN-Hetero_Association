@@ -24,9 +24,9 @@ searches or adjustments are needed.
 #Initial Auto and Hetero Associative Memory Tests
 def modCompareAA():
     # Comparison to PCN MHN
-    print(f'\n\n Moderate Corrupt   Model:{t}')
+    print(f'\n\n Moderate Corrupt ')
     heteroassociate.train(model_type=3, test_t=1, hip_sz=[1024], frcmsk=[.25], data=2, num_seeds=5)
 
     # Comparison to PCN MHN high corruption
-    print(f'\n\n High Corrupt   Model:{t}')
+    print(f'\n\n High Corrupt ')
     heteroassociate.train(model_type=3, test_t=1, hip_sz=[128], frcmsk=[.50], data=2, num_seeds=7, rec_thr=.001)
