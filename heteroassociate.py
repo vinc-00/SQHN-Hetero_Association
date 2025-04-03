@@ -27,7 +27,14 @@ relu = nn.ReLU()
 def get_data(shuf=True, data=2, btch_size=1):
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
 
-    trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    if data == 0:
+        trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    elif data == 1:
+        trainset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform)
+    elif data == 2:
+        trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+    else:
+        trainset = torchvision.datasets.SVHN(root='./data', split='train', download=True, transform=transform)
 
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=btch_size, shuffle=shuf)
 
@@ -73,6 +80,71 @@ def create_train_model(num_imgs, mod_type, data, dev='cuda', act=0):
         return model, images
 
 
+def noise_test(n_seeds, noise, rec_thr, noise_tp=0, hip_sz=500, mod_type=0, data=0):
+
+    rcll_acc = torch.zeros(n_seeds, len(noise)).to('cpu')
+    rcll_mse = torch.zeros(n_seeds).to('cpu')
+    for s in range(n_seeds):
+        mem_unit, mem_images = create_train_model(hip_sz, mod_type, data)
+        with torch.no_grad():
+            mem_images = mem_images.to('cpu')
+
+            for ns in range(len(noise)):
+                if noise_tp == 0:
+                    imgn = torch.clamp(mem_images + torch.randn_like(mem_images) * noise[ns], min=0.000001, max=1).to('cuda')
+                else:
+                    imgn = (mem_images + torch.randn_like(mem_images) * noise[ns]).to('cuda')
+
+
+                #Recall and free up gpu memory
+                p = mem_unit.recall(imgn).to('cpu')
+
+                rcll_acc[s, ns] += ((torch.mean(torch.square((mem_images.reshape(hip_sz, -1) - p.reshape(hip_sz, -1))),
+                                                 dim=1) <= rec_thr).sum() / hip_sz)
+                rcll_mse[s] += torch.mean(torch.square(mem_images.reshape(hip_sz, -1) - p.reshape(hip_sz, -1)))
+
+                p.to('cpu')
+                imgn.to('cpu')
+            mem_images.to('cpu')
+            mem_unit.to('cpu')
+
+
+    return torch.mean(rcll_acc, dim=0), torch.std(rcll_acc, dim=0), torch.mean(rcll_mse, dim=0), torch.std(rcll_mse, dim=0)
+
+
+
+def pixDrop_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
+
+    rcll_acc = torch.zeros(n_seeds, len(frc_msk))
+    rcll_mse = torch.zeros(n_seeds)
+    for s in range(n_seeds):
+        mem_unit, mem_images = create_train_model(hip_sz, mod_type, data)
+        with torch.no_grad():
+            mem_images = mem_images.to('cpu')
+
+            for msk in range(len(frc_msk)):
+                imgDrop = mem_images.clone().to('cuda')
+                mask = torch.rand_like(mem_images[0]) > frc_msk[msk]
+                mask = mask.repeat(mem_images.size(0),1,1,1).to('cuda')
+
+                for c in range(imgDrop.size(1)):
+                    imgDrop[:, c, :, :] *= mask[:,0,:,:]
+
+                p = mem_unit.recall(imgDrop).to('cpu')
+                mask = mask.to('cpu')
+                p = p.view(p.size(0), 3, mem_images.size(2), mem_images.size(3))
+                rcll_acc[s, msk] += ((torch.mean(torch.square(((mem_images - p) * mask).reshape(hip_sz, -1)),
+                                    dim=1) <= rec_thr).sum() / hip_sz)
+                rcll_mse[s] += torch.mean(torch.square((mem_images - p) * mask).reshape(hip_sz, -1))
+
+                imgDrop.to('cpu')
+
+
+    return torch.mean(rcll_acc, dim=0), torch.std(rcll_acc, dim=0), torch.mean(rcll_mse, dim=0), torch.std(rcll_mse, dim=0)
+
+
+
+
 
 def right_mask_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
     rcll_acc = torch.zeros(n_seeds, len(frc_msk))
@@ -88,8 +160,8 @@ def right_mask_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
                 imgMsk = imgMsk.to('cuda')
                 imgMsk[:,:, :, int(mem_images.size(2) - mem_images.size(2) * frc_msk[msk]):] = 0.
 
-                plt.imshow(imgMsk[0].to('cpu').permute(1,2,0))
-                plt.show()
+                '''plt.imshow(imgMsk[0].to('cpu').permute(1,2,0))
+                plt.show()'''
 
                 #Perform recall free up gpu memory
                 p = mem_unit.recall(imgMsk).to('cpu')
@@ -114,15 +186,21 @@ def right_mask_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
 
 #Test recall
 def recall(n_seeds, frcmsk, noise, rec_thr, test_t, hp_sz, mod_type=0, data=0):
+    #Pix drop
+    if test_t == 0:
+        return pixDrop_test(n_seeds, frcmsk, rec_thr, hip_sz=hp_sz[0], mod_type=mod_type, data=data)
     #Mask
-    return right_mask_test(n_seeds, frcmsk, rec_thr, hip_sz=hp_sz[0], mod_type=mod_type, data=data)
-
+    elif test_t == 1:
+        return right_mask_test(n_seeds, frcmsk, rec_thr, hip_sz=hp_sz[0], mod_type=mod_type, data=data)
+    #Noise
+    elif test_t == 2:
+        return noise_test(n_seeds, noise, rec_thr, hip_sz=hp_sz[0], mod_type=mod_type, data=data)
 
 
 
 
 #Trains
-def train(model_type=0, num_seeds=10, hip_sz=[1000], frcmsk=[0], noise=[.2], test_t=0, rec_thr=.001, data=0, act=0):
+def train(model_type=0, num_seeds=10, hip_sz=[1000], frcmsk=[0], noise=[.2], test_t=0, rec_thr=.001, data=2, act=0):
     #Recall
     acc_means, acc_stds, mse_means, mse_stds = recall(num_seeds, frcmsk=frcmsk, noise=noise, rec_thr=rec_thr,
                                                       test_t=test_t, hp_sz=hip_sz, mod_type=model_type, data=data)
