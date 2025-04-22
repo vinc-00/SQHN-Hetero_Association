@@ -8,7 +8,8 @@ import torchvision
 import numpy as np
 import pickle
 import utilities
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
+import random
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
@@ -23,22 +24,69 @@ bce = torch.nn.BCELoss(reduction='sum')
 cos = torch.nn.CosineSimilarity(dim=0)
 relu = nn.ReLU()
 
+class PairedMNIST(Dataset):
+    def __init__(self, digit_pairs=[(2,9), (3,4), (7,8), (1,5), (6,0)], num_pairs_per_class=10000, root='./data'):
+        transform = transforms.Compose([transforms.ToTensor()])
+        
+        # Load MNIST dataset
+        mnist = torchvision.datasets.MNIST(root=root, train=True, download=True, transform=transform)
+
+        self.pairs = []
+        self.labels = []
+
+        for digit1, digit2 in digit_pairs:
+            # Get images of each digit
+            imgs1 = mnist.data[mnist.targets == digit1]
+            imgs2 = mnist.data[mnist.targets == digit2]
+
+            # Randomly select images to create fixed number of pairs
+            num_pairs = min(num_pairs_per_class, len(imgs1), len(imgs2))
+            idx1 = torch.randperm(len(imgs1))[:num_pairs]  # Random indices for digit1
+            idx2 = torch.randperm(len(imgs2))[:num_pairs]  # Random indices for digit2
+
+            # Select the images using the random indices
+            paired_imgs1 = imgs1[idx1]
+            paired_imgs2 = imgs2[idx2]
+
+            # Concatenate all images in a **single operation** (no loops!)
+            paired_batch = torch.cat((paired_imgs1, paired_imgs2), dim=2)  # Concatenate along width
+
+            # Store the paired images and labels (as a tuple)
+            self.pairs.append(paired_batch)
+            self.labels.extend([(digit1, digit2)] * num_pairs)  # Add labels for each pair
+
+        # Stack all pairs into a single tensor
+        self.pairs = torch.cat(self.pairs, dim=0)  # Now it's a tensor instead of a list
+        print(f"Total pairs created: {len(self.pairs)}")
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        # Return the image and the corresponding pair of labels
+        image = self.pairs[idx].unsqueeze(0).float() / 255.0  # Normalize & add channel dim
+        labels = self.labels[idx]  # Get the corresponding labels
+        return image, labels  # Return both image and labels as a tuple
+
 #Reduces data to specified number of examples per category
 def get_data(shuf=True, data=2, btch_size=1):
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
 
-    if data == 0:
-        trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-    elif data == 1:
-        trainset = torchvision.datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform)
-    elif data == 2:
-        trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-    else:
-        trainset = torchvision.datasets.SVHN(root='./data', split='train', download=True, transform=transform)
+    dataset = PairedMNIST(digit_pairs=[(2, 9), (3, 4), (7, 8), (1, 5), (6, 0)], num_pairs_per_class=10000)
+
+    test_size = int(len(dataset) * test_split)
+    train_size = len(dataset) - test_size
+    trainset, testset = random_split(dataset, [train_size, test_size])
+    
+
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=btch_size, shuffle=shuf)
+    test_loader = (
+        torch.utils.data.DataLoader(testset, batch_size=btch_size, shuffle=False) if testset else None
+    )
 
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=btch_size, shuffle=shuf)
 
-    return train_loader
+    return train_loader, test_loader
 
 
 
@@ -55,7 +103,7 @@ def plot_ex(imgs, name):
 #
 def create_train_model(num_imgs, mod_type, data, dev='cuda', act=0):
     # Memorize
-    train_loader = get_data(shuf=True, data=data, btch_size=num_imgs)
+    train_loader, test_loader = get_data(shuf=True, data=data, btch_size=num_imgs)
     for batch_idx, (images, y) in enumerate(train_loader):
         if mod_type == 0:
             model = Unit.MemUnit(layer_szs=[images.view(images.size(0), -1).size(1), num_imgs], simFunc=0, actFunc=1).to(dev)
@@ -77,7 +125,7 @@ def create_train_model(num_imgs, mod_type, data, dev='cuda', act=0):
             model.load_wts(images)
 
 
-        return model, images
+    return model, test_loader
 
 
 def noise_test(n_seeds, noise, rec_thr, noise_tp=0, hip_sz=500, mod_type=0, data=0):
@@ -145,37 +193,47 @@ def pixDrop_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
 
 
 
-
 def right_mask_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
     rcll_acc = torch.zeros(n_seeds, len(frc_msk))
     rcll_mse = torch.zeros(n_seeds)
 
     for s in range(n_seeds):
-        mem_unit, mem_images = create_train_model(hip_sz, mod_type, data)
+        mem_unit, test_loader = create_train_model(hip_sz, mod_type, data)
+
+        for batch_idx, (test_images, _) in enumerate(test_loader):
+            break  # just grab one batch
+
+        test_images = test_images.to('cpu')
+
         with torch.no_grad():
             mem_images = mem_images.to('cpu')
 
             for msk in range(len(frc_msk)):
                 imgMsk = mem_images.clone()
                 imgMsk = imgMsk.to('cuda')
-                imgMsk[:,:, :, int(mem_images.size(2) - mem_images.size(2) * frc_msk[msk]):] = 0.
+                plt.imsave(f"./images/output_image_{s}_{msk}.png", imgMsk[0].cpu().squeeze(), cmap="gray")
 
-                '''plt.imshow(imgMsk[0].to('cpu').permute(1,2,0))
-                plt.show()'''
+                # Masking operation for grayscale (single-channel) images
+                imgMsk[:, :, :, int(mem_images.size(2) - mem_images.size(2) * frc_msk[msk]):] = 0.
 
-                #Perform recall free up gpu memory
+                plt.imsave(f"./images/output_image_msk_{s}_{msk}.png", imgMsk[0].cpu().squeeze(), cmap="gray")
+
+                # Perform recall and free up GPU memory
                 p = mem_unit.recall(imgMsk).to('cpu')
 
-                p = p.view(p.size(0), 3, mem_images.size(2), mem_images.size(3))
+                # Adjust the reshaping for grayscale images (1 channel)
+                p = p.view(p.size(0), 1, mem_images.size(2), mem_images.size(3))
+
+                # Compute metrics
                 lng = int(mem_images.size(2) * (1 - frc_msk[msk]))
-                rcll_acc[s, msk] += ((torch.mean(torch.square(((mem_images[:,:,:,0:lng] - p[:,:,:,0:lng])).reshape(hip_sz, -1)),
+                rcll_acc[s, msk] += ((torch.mean(torch.square(((mem_images[:, :, :, 0:lng] - p[:, :, :, 0:lng])).reshape(hip_sz, -1)),
                                                  dim=1) <= rec_thr).sum() / hip_sz)
-                rcll_mse[s] += torch.mean(torch.square((mem_images[:,:,:,0:lng] - p[:,:,:,0:lng])).reshape(hip_sz, -1))
+                rcll_mse[s] += torch.mean(torch.square((mem_images[:, :, :, 0:lng] - p[:, :, :, 0:lng])).reshape(hip_sz, -1))
 
                 imgMsk.to('cpu')
 
-
     return torch.mean(rcll_acc, dim=0), torch.std(rcll_acc, dim=0), torch.mean(rcll_mse, dim=0), torch.std(rcll_mse, dim=0)
+
 
 
 
