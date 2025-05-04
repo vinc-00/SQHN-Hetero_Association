@@ -23,5 +23,5 @@ searches or adjustments are needed.
 
 #Initial Auto and Hetero Associative Memory Tests
 def modCompareAA():
-    heteroassociate.train(model_type=1, test_t=1, hip_sz=[1024], frcmsk=[.50], data=0, num_seeds=5)
+    heteroassociate.train(model_type=4, test_t=1, hip_sz=[1568], frcmsk=[.25], data=0, num_seeds=5)
 

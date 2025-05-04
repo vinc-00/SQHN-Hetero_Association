@@ -10,6 +10,7 @@ import pickle
 import utilities
 from torch.utils.data import Dataset, DataLoader
 import random
+from torch.utils.data import random_split
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
@@ -26,7 +27,7 @@ relu = nn.ReLU()
 
 class PairedMNIST(Dataset):
     def __init__(self, digit_pairs=[(2,9), (3,4), (7,8), (1,5), (6,0)], num_pairs_per_class=10000, root='./data'):
-        transform = transforms.Compose([transforms.ToTensor()])
+        transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
         
         # Load MNIST dataset
         mnist = torchvision.datasets.MNIST(root=root, train=True, download=True, transform=transform)
@@ -57,6 +58,7 @@ class PairedMNIST(Dataset):
 
         # Stack all pairs into a single tensor
         self.pairs = torch.cat(self.pairs, dim=0)  # Now it's a tensor instead of a list
+        print("Paired batch shape:", paired_batch.shape)
         print(f"Total pairs created: {len(self.pairs)}")
 
     def __len__(self):
@@ -74,17 +76,22 @@ def get_data(shuf=True, data=2, btch_size=1):
 
     dataset = PairedMNIST(digit_pairs=[(2, 9), (3, 4), (7, 8), (1, 5), (6, 0)], num_pairs_per_class=10000)
 
-    test_size = int(len(dataset) * test_split)
+    test_size = int(len(dataset) * 0.1)
     train_size = len(dataset) - test_size
     trainset, testset = random_split(dataset, [train_size, test_size])
-    
 
-    train_loader = torch.utils.data.DataLoader(trainset, batch_size=btch_size, shuffle=shuf)
-    test_loader = (
-        torch.utils.data.DataLoader(testset, batch_size=btch_size, shuffle=False) if testset else None
+    train_loader = torch.utils.data.DataLoader(
+        trainset,
+        batch_size=btch_size,
+        shuffle=shuf,
+        drop_last=True  # <-- Drop last partial batch
     )
-
-    train_loader = torch.utils.data.DataLoader(trainset, batch_size=btch_size, shuffle=shuf)
+    test_loader = torch.utils.data.DataLoader(
+        testset,
+        batch_size=btch_size,
+        shuffle=False,
+        drop_last=True  # Optional, if you want full-size batches during test
+    )
 
     return train_loader, test_loader
 
@@ -104,28 +111,25 @@ def plot_ex(imgs, name):
 def create_train_model(num_imgs, mod_type, data, dev='cuda', act=0):
     # Memorize
     train_loader, test_loader = get_data(shuf=True, data=data, btch_size=num_imgs)
+    print("num_images: ", num_imgs)
     for batch_idx, (images, y) in enumerate(train_loader):
         if mod_type == 0:
             model = Unit.MemUnit(layer_szs=[images.view(images.size(0), -1).size(1), num_imgs], simFunc=0, actFunc=1).to(dev)
         elif mod_type == 1:
             model = Unit.MemUnit(layer_szs=[images.view(images.size(0), -1).size(1), num_imgs], simFunc=4, actFunc=act).to(dev)
         elif mod_type == 2:
-            model = Tree.Tree(in_dim=images.size(2), chnls=num_imgs, actFunc=act, arch=9, b_sim=4).to(dev)
+            model = Tree.Tree(in_dim=images.view(images.size(0), -1).size(1), chnls=num_imgs, actFunc=act, arch=9, b_sim=4).to(dev)
         elif mod_type == 3:
-            model = Tree.Tree(in_dim=images.size(2), chnls=num_imgs, actFunc=act, arch=8, b_sim=4).to(dev)
+            model = Tree.Tree(in_dim=images.size(0), chnls=num_imgs, actFunc=act, arch=8, b_sim=4).to(dev)
         elif mod_type == 4:
             model = Unit.MemUnit(layer_szs=[images.view(images.size(0), -1).size(1), num_imgs], simFunc=5, actFunc=act).to(dev)
         elif mod_type == 5:
             model = MHN.MemUnit(layer_szs=[images.view(images.size(0), -1).size(1), num_imgs], lr=.03, beta=.00001*num_imgs, optim=1).to(dev)
 
         images = images.to(dev)
-        if mod_type < 2 or mod_type > 3:
-            model.load_wts(images.view(images.size(0), -1))
-        else:
-            model.load_wts(images)
+        model.load_wts(images.view(images.size(0), -1))
 
-
-    return model, test_loader
+        return model, train_loader
 
 
 def noise_test(n_seeds, noise, rec_thr, noise_tp=0, hip_sz=500, mod_type=0, data=0):
@@ -193,7 +197,7 @@ def pixDrop_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
 
 
 
-def right_mask_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
+def right_mask_test(n_seeds, frc_msk, rec_thr, hip_sz=1568, mod_type=0, data=0):
     rcll_acc = torch.zeros(n_seeds, len(frc_msk))
     rcll_mse = torch.zeros(n_seeds)
 
@@ -206,15 +210,14 @@ def right_mask_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
         test_images = test_images.to('cpu')
 
         with torch.no_grad():
-            mem_images = mem_images.to('cpu')
 
             for msk in range(len(frc_msk)):
-                imgMsk = mem_images.clone()
+                imgMsk = test_images.clone()
                 imgMsk = imgMsk.to('cuda')
                 plt.imsave(f"./images/output_image_{s}_{msk}.png", imgMsk[0].cpu().squeeze(), cmap="gray")
 
                 # Masking operation for grayscale (single-channel) images
-                imgMsk[:, :, :, int(mem_images.size(2) - mem_images.size(2) * frc_msk[msk]):] = 0.
+                imgMsk[:, :, :, int(test_images.size(2) - test_images.size(2) * frc_msk[msk]):] = 0.
 
                 plt.imsave(f"./images/output_image_msk_{s}_{msk}.png", imgMsk[0].cpu().squeeze(), cmap="gray")
 
@@ -222,13 +225,15 @@ def right_mask_test(n_seeds, frc_msk, rec_thr, hip_sz=500, mod_type=0, data=0):
                 p = mem_unit.recall(imgMsk).to('cpu')
 
                 # Adjust the reshaping for grayscale images (1 channel)
-                p = p.view(p.size(0), 1, mem_images.size(2), mem_images.size(3))
+                p = p.view(p.size(0), 1, test_images.size(2), test_images.size(3))
+
+                plt.imsave(f"./images/output_image_msk_predict_{s}_{msk}.png", p[0].cpu().squeeze(), cmap="gray")
 
                 # Compute metrics
-                lng = int(mem_images.size(2) * (1 - frc_msk[msk]))
-                rcll_acc[s, msk] += ((torch.mean(torch.square(((mem_images[:, :, :, 0:lng] - p[:, :, :, 0:lng])).reshape(hip_sz, -1)),
+                lng = int(test_images.size(2) * (1 - frc_msk[msk]))
+                rcll_acc[s, msk] += ((torch.mean(torch.square(((test_images[:, :, :, 0:lng] - p[:, :, :, 0:lng])).reshape(hip_sz, -1)),
                                                  dim=1) <= rec_thr).sum() / hip_sz)
-                rcll_mse[s] += torch.mean(torch.square((mem_images[:, :, :, 0:lng] - p[:, :, :, 0:lng])).reshape(hip_sz, -1))
+                rcll_mse[s] += torch.mean(torch.square((test_images[:, :, :, 0:lng] - p[:, :, :, 0:lng])).reshape(hip_sz, -1))
 
                 imgMsk.to('cpu')
 
@@ -258,7 +263,7 @@ def recall(n_seeds, frcmsk, noise, rec_thr, test_t, hp_sz, mod_type=0, data=0):
 
 
 #Trains
-def train(model_type=0, num_seeds=10, hip_sz=[1000], frcmsk=[0], noise=[.2], test_t=0, rec_thr=.001, data=2, act=0):
+def train(model_type=0, num_seeds=10, hip_sz=[1568], frcmsk=[0], noise=[.2], test_t=0, rec_thr=.001, data=2, act=0):
     #Recall
     acc_means, acc_stds, mse_means, mse_stds = recall(num_seeds, frcmsk=frcmsk, noise=noise, rec_thr=rec_thr,
                                                       test_t=test_t, hp_sz=hip_sz, mod_type=model_type, data=data)
