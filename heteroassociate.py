@@ -132,6 +132,44 @@ def create_train_model(num_imgs, mod_type, data, dev='cuda', act=0):
         return model, train_loader
 
 
+def train_model_over_batches(num_imgs, mod_type, data, dev='cuda', act=0, epochs=1):
+    train_loader, test_loader = get_data(shuf=True, data=data, btch_size=num_imgs)
+    model = None
+
+    for batch_idx, (images, y) in enumerate(train_loader):
+        images = images.view(images.size(0), -1).to(dev)
+
+        # Initialize model only once
+        if model is None:
+            if mod_type == 0:
+                model = Unit.MemUnit(layer_szs=[images.size(1), num_imgs], simFunc=0, actFunc=1).to(dev)
+            elif mod_type == 1:
+                model = Unit.MemUnit(layer_szs=[images.size(1), num_imgs], simFunc=4, actFunc=act).to(dev)
+            elif mod_type == 4:
+                model = Unit.MemUnit(layer_szs=[images.size(1), num_imgs], simFunc=5, actFunc=act).to(dev)
+            elif mod_type == 5:
+                model = MHN.MemUnit(layer_szs=[images.size(1), num_imgs], lr=.03, beta=.00001*num_imgs, optim=1).to(dev)
+            else:
+                raise ValueError(f"Unsupported mod_type {mod_type}")
+
+        # For each image in the batch, update weights via inference and rules
+        for i in range(images.size(0)):
+            input_i = images[i].unsqueeze(0)  # shape: (1, D)
+            lk = model.infer_step(input_i)
+            if model.actFunc == 0:
+                z = F.one_hot(torch.argmax(lk, dim=1), num_classes=model.layer_szs[1]).float().to(dev)
+            else:
+                z = softmax(lk * model.beta).to(dev)
+
+            model.update_wts(lk, z, input_i)
+
+        # Optional: break early for debug/testing
+        # if batch_idx > 10:
+        #     break
+
+    return model, test_loader
+
+
 def noise_test(n_seeds, noise, rec_thr, noise_tp=0, hip_sz=500, mod_type=0, data=0):
 
     rcll_acc = torch.zeros(n_seeds, len(noise)).to('cpu')
@@ -202,7 +240,7 @@ def right_mask_test(n_seeds, frc_msk, rec_thr, hip_sz=1568, mod_type=0, data=0):
     rcll_mse = torch.zeros(n_seeds)
 
     for s in range(n_seeds):
-        mem_unit, test_loader = create_train_model(hip_sz, mod_type, data)
+        mem_unit, test_loader = train_model_over_batches(hip_sz, mod_type, data)
 
         for batch_idx, (test_images, _) in enumerate(test_loader):
             break  # just grab one batch
